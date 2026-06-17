@@ -99,6 +99,48 @@ input[type=text], input[type=date], input[type=number] { width: 100%; padding: 9
 .fin-case-row:last-child { border-bottom: none; }
 .fin-input { width: 110px; padding: 6px 8px; border-radius: 8px; border: 1.5px solid #DDE2EE; font-size: 13px; font-family: inherit; direction: rtl; text-align: left; outline: none; }
 </style>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js";
+  import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyCyI27I02I7-iFWnIa2mvDB1Qd3Sfr4IUs",
+    authDomain: "parvande-ai.firebaseapp.com",
+    projectId: "parvande-ai",
+    storageBucket: "parvande-ai.firebasestorage.app",
+    messagingSenderId: "329989899571",
+    appId: "1:329989899571:web:6c3c2706685e36fcbcea46"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+
+  // Save to Firestore
+  window.saveToCloud = async function(key, value) {
+    try {
+      await setDoc(doc(db, "data", key), { value: value, updatedAt: new Date().toISOString() });
+    } catch(e) { console.error("Cloud save error:", e); }
+  };
+
+  // Load from Firestore
+  window.loadFromCloud = async function(key) {
+    try {
+      const snap = await getDoc(doc(db, "data", key));
+      if(snap.exists()) return snap.data().value;
+    } catch(e) { console.error("Cloud load error:", e); }
+    return null;
+  };
+
+  // Listen for realtime changes
+  window.listenToCloud = function(key, callback) {
+    return onSnapshot(doc(db, "data", key), (snap) => {
+      if(snap.exists()) callback(snap.data().value);
+    });
+  };
+
+  window.firebaseReady = true;
+  document.dispatchEvent(new Event("firebaseReady"));
+</script>
 </head>
 <body>
 <div id="app"><div class="loading">در حال بارگذاری...</div></div>
@@ -107,7 +149,7 @@ input[type=text], input[type=date], input[type=number] { width: 100%; padding: 9
 <div class="modal-overlay" id="modal-new">
   <div class="modal">
     <h3>ثبت پرونده جدید</h3>
-    <label>وکیل</label>
+    <label>وکیل (مالک) *</label>
     <input type="text" id="new-lawyer" placeholder="نام وکیل">
     <label>پلاک ملک</label>
     <div class="plate-row">
@@ -121,7 +163,7 @@ input[type=text], input[type=date], input[type=number] { width: 100%; padding: 9
     <input type="number" id="new-area" placeholder="مثلاً ۱۲۰">
     <label>نوع</label>
     <div class="type-btns" id="new-type-btns"></div>
-    <label>نام موکل *</label>
+    <label>نام موکل (مالک یا مالکین)</label>
     <input type="text" id="new-name" placeholder="نام و نام خانوادگی">
     <label>تاریخ دریافت</label>
     <input type="date" id="new-date">
@@ -141,7 +183,7 @@ input[type=text], input[type=date], input[type=number] { width: 100%; padding: 9
 <div class="modal-overlay" id="modal-edit">
   <div class="modal">
     <h3>ویرایش پرونده</h3>
-    <label>وکیل</label>
+    <label>وکیل (مالک) *</label>
     <input type="text" id="edit-lawyer">
     <label>پلاک ملک</label>
     <div class="plate-row">
@@ -155,7 +197,7 @@ input[type=text], input[type=date], input[type=number] { width: 100%; padding: 9
     <input type="number" id="edit-area" placeholder="مثلاً ۱۲۰">
     <label>نوع</label>
     <div class="type-btns" id="edit-type-btns"></div>
-    <label>نام موکل</label>
+    <label>نام موکل (مالک یا مالکین)</label>
     <input type="text" id="edit-name">
     <label>تاریخ دریافت</label>
     <input type="date" id="edit-date">
@@ -213,12 +255,70 @@ let sortBy="date", searchVisible=false;
 let editingStages=[], newTypeSelected="", editTypeSelected="";
 let editingCaseId=null;
 
+let syncUnsubscribe = null;
+
 function load() {
+  // Load from localStorage first (instant)
   try { cases=JSON.parse(localStorage.getItem("pv-cases")||"[]"); } catch { cases=[]; }
   try { stages=JSON.parse(localStorage.getItem("pv-stages")||"null")||DEFAULT_STAGES; } catch { stages=DEFAULT_STAGES; }
+  
+  // Then sync from cloud
+  loadCloud();
 }
-function saveC() { localStorage.setItem("pv-cases",JSON.stringify(cases)); }
-function saveS() { localStorage.setItem("pv-stages",JSON.stringify(stages)); }
+
+async function loadCloud() {
+  if(!window.firebaseReady) {
+    document.addEventListener("firebaseReady", loadCloud, {once:true});
+    return;
+  }
+  try {
+    showSyncStatus("در حال بارگذاری از ابر...");
+    const cloudCases = await window.loadFromCloud("cases");
+    const cloudStages = await window.loadFromCloud("stages");
+    if(cloudCases) { cases = JSON.parse(cloudCases); localStorage.setItem("pv-cases", cloudCases); }
+    if(cloudStages) { stages = JSON.parse(cloudStages); localStorage.setItem("pv-stages", cloudStages); }
+    showSyncStatus("✅ همگام‌سازی شد", 2000);
+    render();
+    
+    // Listen for realtime updates
+    if(syncUnsubscribe) syncUnsubscribe();
+    syncUnsubscribe = window.listenToCloud("cases", (val) => {
+      const newCases = JSON.parse(val);
+      // Only update if different
+      if(JSON.stringify(newCases) !== JSON.stringify(cases)) {
+        cases = newCases;
+        localStorage.setItem("pv-cases", val);
+        render();
+        showSyncStatus("🔄 بروزرسانی شد", 1500);
+      }
+    });
+  } catch(e) {
+    showSyncStatus("⚠️ خطا در اتصال به ابر", 3000);
+  }
+}
+
+function showSyncStatus(msg, hideAfter=0) {
+  let el = document.getElementById("sync-status");
+  if(!el) return;
+  el.textContent = msg;
+  el.style.opacity = "1";
+  if(hideAfter) setTimeout(()=>{ el.style.opacity="0"; }, hideAfter);
+}
+
+function saveC() {
+  const val = JSON.stringify(cases);
+  localStorage.setItem("pv-cases", val);
+  // Save to cloud
+  if(window.firebaseReady) {
+    showSyncStatus("در حال ذخیره...");
+    window.saveToCloud("cases", val).then(()=>showSyncStatus("✅ ذخیره شد", 1500));
+  }
+}
+function saveS() {
+  const val = JSON.stringify(stages);
+  localStorage.setItem("pv-stages", val);
+  if(window.firebaseReady) window.saveToCloud("stages", val);
+}
 
 function today() { return new Date().toISOString().split("T")[0]; }
 function fmtDate(d) { if(!d) return "—"; try { return new Date(d).toLocaleDateString("fa-IR"); } catch { return d; } }
@@ -306,7 +406,8 @@ function caseCardHTML(c) {
 }
 
 function bottomNav() {
-  return `<div class="bottom-nav">
+  return `<div class="sync-bar" id="sync-status" style="text-align:center;font-size:11px;color:#6B7FD7;background:#EEF0FC;padding:4px;opacity:0;transition:opacity 0.3s"></div>
+  <div class="bottom-nav">
     <button class="nav-btn ${currentTab==='cases'?'active':''}" onclick="switchTab('cases')"><span class="nav-icon">📁</span>پرونده‌ها</button>
     <button class="nav-btn ${currentTab==='lawyers'?'active':''}" onclick="switchTab('lawyers')"><span class="nav-icon">👤</span>وکلا</button>
     <button class="nav-btn ${currentTab==='finance'?'active':''}" onclick="switchTab('finance')"><span class="nav-icon">💰</span>مالی</button>
@@ -696,11 +797,12 @@ function selectType(prefix,t){
 
 function addCase(){
   const name=document.getElementById("new-name").value.trim();
-  if(!name){alert("نام موکل الزامی است");return;}
+  const lawyer=document.getElementById("new-lawyer").value.trim();
+  if(!lawyer){alert("نام وکیل الزامی است");return;}
   const c={
     id:Date.now().toString(),
     name,
-    lawyer:document.getElementById("new-lawyer").value.trim(),
+    lawyer:lawyer,
     type:newTypeSelected,
     plateFar:document.getElementById("new-plate-far").value.trim(),
     plateAsl:document.getElementById("new-plate-asl").value.trim(),
